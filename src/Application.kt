@@ -12,6 +12,8 @@ import kotlinx.css.*
 import io.ktor.client.*
 import io.ktor.client.engine.apache.*
 import io.ktor.features.ContentNegotiation
+import io.ktor.features.NotFoundException
+import io.ktor.features.StatusPages
 import io.ktor.jackson.jackson
 
 fun main(args: Array<String>): Unit = io.ktor.server.netty.EngineMain.main(args)
@@ -68,23 +70,51 @@ fun Application.module(testing: Boolean = false) {
         }
     }
 
+    install(StatusPages) {
+        exception<Throwable> {
+            call.respond(HttpStatusCode.InternalServerError)
+        }
+
+        exception<NotFoundException> {
+            call.respond(HttpStatusCode.NotFound)
+        }
+    }
+
     routing {
         get("/") {
             call.respond(mapOf("OK" to true))
         }
 
-        get("/problems") {
-            val problems = testProblems.map {
-                mapOf(
-                    "id" to it.id,
-                    "title" to it.title
+        route("problems") {
+            get {
+                val problems = testProblems.map {
+                    mapOf(
+                        "id" to it.id,
+                        "title" to it.title
+                    )
+                }
+
+                call.respond(
+                    mapOf(
+                        "problems" to problems,
+                        "OK" to true
+                    )
                 )
             }
 
-            call.respond(mapOf(
-                "problems" to problems,
-                "OK" to true
-            ))
+            get("{id}") {
+                val requestId = call.parameters["id"]
+                val requestProblem = testProblems.firstOrNull() {
+                    it.id == requestId
+                };
+
+                call.respond(
+                    mapOf(
+                        "problem" to (requestProblem ?: throw NotFoundException()),
+                        "OK" to true
+                    )
+                )
+            }
         }
     }
 }
