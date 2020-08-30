@@ -1,5 +1,6 @@
 package com.maplewing
 
+import com.fasterxml.jackson.databind.SerializationFeature
 import io.ktor.application.*
 import io.ktor.response.*
 import io.ktor.request.*
@@ -15,6 +16,47 @@ import io.ktor.jackson.jackson
 
 fun main(args: Array<String>): Unit = io.ktor.server.netty.EngineMain.main(args)
 
+val testProblems = listOf(
+    Problem(
+        "101",
+        "A + B Problem",
+        "輸入兩數，將兩數加總。",
+        listOf(
+            TestCase(
+                "3 4",
+                "7",
+                "",
+                50
+            ),
+            TestCase(
+                "2147483646 1",
+                "2147483647",
+                "",
+                50
+            )
+        )
+    ),
+    Problem(
+        "102",
+        "A + B + C Problem",
+        "輸入三數，將三數加總。",
+        listOf(
+            TestCase(
+                "3 4 5",
+                "12",
+                "",
+                50
+            ),
+            TestCase(
+                "2147483646 1 -1",
+                "2147483646",
+                "",
+                50
+            )
+        )
+    )
+)
+
 @kotlin.jvm.JvmOverloads
 fun Application.module(testing: Boolean = false) {
     val client = HttpClient(Apache) {
@@ -22,12 +64,27 @@ fun Application.module(testing: Boolean = false) {
 
     install(ContentNegotiation) {
         jackson {
+            enable(SerializationFeature.INDENT_OUTPUT) // Pretty Prints the JSON
         }
     }
 
     routing {
         get("/") {
             call.respond(mapOf("OK" to true))
+        }
+
+        get("/problems") {
+            val problems = testProblems.map {
+                mapOf(
+                    "id" to it.id,
+                    "title" to it.title
+                )
+            }
+
+            call.respond(mapOf(
+                "problems" to problems,
+                "OK" to true
+            ))
         }
     }
 }
