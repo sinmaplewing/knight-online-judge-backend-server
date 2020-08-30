@@ -15,10 +15,11 @@ import io.ktor.features.ContentNegotiation
 import io.ktor.features.NotFoundException
 import io.ktor.features.StatusPages
 import io.ktor.jackson.jackson
+import java.util.*
 
 fun main(args: Array<String>): Unit = io.ktor.server.netty.EngineMain.main(args)
 
-val testProblems = listOf(
+val testProblems = Collections.synchronizedList(mutableListOf(
     Problem(
         "101",
         "A + B Problem",
@@ -57,7 +58,7 @@ val testProblems = listOf(
             )
         )
     )
-)
+))
 
 @kotlin.jvm.JvmOverloads
 fun Application.module(testing: Boolean = false) {
@@ -77,6 +78,10 @@ fun Application.module(testing: Boolean = false) {
 
         exception<NotFoundException> {
             call.respond(HttpStatusCode.NotFound)
+        }
+
+        exception<IdAlreadyExistedException> {
+            call.respond(HttpStatusCode.BadRequest)
         }
     }
 
@@ -102,18 +107,57 @@ fun Application.module(testing: Boolean = false) {
                 )
             }
 
-            get("{id}") {
-                val requestId = call.parameters["id"]
-                val requestProblem = testProblems.firstOrNull() {
-                    it.id == requestId
-                };
+            post {
+                val newProblem = call.receive<Problem>()
+                if (testProblems.any { it.id == newProblem.id }) {
+                    throw IdAlreadyExistedException()
+                }
 
-                call.respond(
-                    mapOf(
-                        "problem" to (requestProblem ?: throw NotFoundException()),
-                        "OK" to true
+                testProblems += newProblem
+
+                call.respond(mapOf(
+                    "OK" to true
+                ))
+            }
+
+            route("{id}") {
+                get {
+                    val requestId = call.parameters["id"]
+                    val requestProblem = testProblems.firstOrNull() {
+                        it.id == requestId
+                    };
+
+                    call.respond(
+                        mapOf(
+                            "problem" to (requestProblem ?: throw NotFoundException()),
+                            "OK" to true
+                        )
                     )
-                )
+                }
+
+                put {
+                    val requestId = call.parameters["id"]
+                    if (!testProblems.removeIf { it.id == requestId }) {
+                        throw NotFoundException()
+                    }
+
+                    val updateProblemContent = call.receive<Problem>()
+                    testProblems += updateProblemContent
+                    call.respond(mapOf(
+                        "OK" to true
+                    ))
+                }
+
+                delete {
+                    val requestId = call.parameters["id"]
+                    if (!testProblems.removeIf { it.id == requestId }) {
+                        throw NotFoundException()
+                    }
+
+                    call.respond(mapOf(
+                        "OK" to true
+                    ))
+                }
             }
         }
     }
