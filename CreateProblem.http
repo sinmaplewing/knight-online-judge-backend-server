@@ -1,0 +1,28 @@
+POST http://0.0.0.0:8080/problems
+Content-Type: application/json
+
+{
+  "id": "103",
+  "title": "四數相加",
+  "description": "輸入四數，將四數加總。",
+  "testCases": [
+    {
+      "input": "3 4 5 6",
+      "expectedOutput": "18",
+      "comment": "",
+      "score": 50,
+      "timeOutSeconds": 10.0
+    },
+    {
+      "input": "2147483646 1 -1 -1",
+      "expectedOutput": "2147483645",
+      "comment": "",
+      "score": 50,
+      "timeOutSeconds": 10.0
+    }
+  ]
+}
+
+###
+
+GET http://0.0.0.0:8080/problems/103
