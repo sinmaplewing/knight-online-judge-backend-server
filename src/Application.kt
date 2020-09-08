@@ -3,6 +3,8 @@ package com.maplewing
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.SerializationFeature
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import com.zaxxer.hikari.HikariConfig
+import com.zaxxer.hikari.HikariDataSource
 import io.ktor.application.*
 import io.ktor.response.*
 import io.ktor.request.*
@@ -20,83 +22,36 @@ import io.ktor.jackson.jackson
 import io.ktor.util.pipeline.PipelineContext
 import io.ktor.utils.io.ByteReadChannel
 import io.ktor.utils.io.jvm.javaio.toInputStream
+import org.jetbrains.exposed.sql.*
+import org.jetbrains.exposed.sql.transactions.transaction
+import java.lang.NullPointerException
 import java.util.*
 
 fun main(args: Array<String>): Unit = io.ktor.server.netty.EngineMain.main(args)
 
-class PlainConverter() : ContentConverter {
-    override suspend fun convertForSend(context: PipelineContext<Any, ApplicationCall>, contentType: ContentType, value: Any): Any? {
-        return TextContent("XD", contentType.withCharset(context.call.suitableCharset()))
-    }
+fun initDatabase() {
+    val config = HikariConfig("/hikari.properties")
+    config.schema = "public"
+    val dataSource = HikariDataSource(config)
+    Database.connect(dataSource)
 
-    override suspend fun convertForReceive(context: PipelineContext<ApplicationReceiveRequest, ApplicationCall>): Any? {
-        val request = context.subject
-        return null
+    transaction {
+        SchemaUtils.create(ProblemTable, TestCaseTable)
     }
 }
 
 @Suppress("unused") // Referenced in application.conf
 @kotlin.jvm.JvmOverloads
 fun Application.module(testing: Boolean = false) {
-    val testProblems = Collections.synchronizedList(mutableListOf(
-        Problem(
-            "101",
-            "A + B Problem",
-            "輸入兩數，將兩數加總。",
-            listOf(
-                TestCase(
-                    "3 4",
-                    "7",
-                    "",
-                    50,
-                    10.0
-                ),
-                TestCase(
-                    "2147483646 1",
-                    "2147483647",
-                    "",
-                    50,
-                    10.0
-                )
-            )
-        ),
-        Problem(
-            "102",
-            "A + B + C Problem",
-            "輸入三數，將三數加總。",
-            listOf(
-                TestCase(
-                    "3 4 5",
-                    "12",
-                    "",
-                    50,
-                    10.0
-                ),
-                TestCase(
-                    "2147483646 1 -1",
-                    "2147483646",
-                    "",
-                    50,
-                    10.0
-                )
-            )
-        )
-    ))
-
+    initDatabase()
 
     val client = HttpClient(Apache) {
     }
 
-     // Pretty Prints the JSON
-
     install(ContentNegotiation) {
-
-        register(ContentType.Text.Plain, PlainConverter())
-
-        register(ContentType.Application.Json, JacksonConverter(
-            jacksonObjectMapper().enable(SerializationFeature.INDENT_OUTPUT)
-        ))
-
+        jackson {
+            enable(SerializationFeature.INDENT_OUTPUT) // Pretty Prints the JSON
+        }
     }
 
     install(StatusPages) {
@@ -128,11 +83,15 @@ fun Application.module(testing: Boolean = false) {
 
         route("/problems") {
             get {
-                val problems = testProblems.map {
-                    mapOf(
-                        "id" to it.id,
-                        "title" to it.title
-                    )
+                var problems: List<Map<String, Any>>? = null
+
+                transaction {
+                    problems = ProblemTable.selectAll().map {
+                        mapOf(
+                            "id" to it[ProblemTable.id].toString(),
+                            "title" to it[ProblemTable.title]
+                        )
+                    }
                 }
 
                 call.respond(mapOf(
@@ -141,49 +100,121 @@ fun Application.module(testing: Boolean = false) {
             }
 
             post {
-                val newProblem = call.receive<Problem>()
-                if (testProblems.any { it.id == newProblem.id }) {
-                    throw IdAlreadyExistedException()
+                val newProblem = call.receive<ProblemPostDTO>()
+                var newProblemId : Int? = null
+
+                transaction {
+                    newProblemId = ProblemTable.insert {
+                        it[title] = newProblem.title
+                        it[description] = newProblem.description
+                    } get ProblemTable.id
+
+                    for (testCase in newProblem.testCases) {
+                        TestCaseTable.insert {
+                            it[input] = testCase.input
+                            it[expectedOutput] = testCase.expectedOutput
+                            it[comment] = testCase.comment
+                            it[score] = testCase.score
+                            it[timeOutSeconds] = testCase.timeOutSeconds
+                            it[problemId] = newProblemId!!
+                        }
+                    }
                 }
 
-                testProblems += newProblem
-
                 call.respond(mapOf(
-                    "OK" to true
+                    "problem_id" to newProblemId
                 ))
             }
 
             route("/{id}") {
                 get {
-                    val requestId = call.parameters["id"]
-                    val requestProblem = testProblems.firstOrNull() {
-                        it.id == requestId
-                    };
+                    val requestId = call.parameters["id"]?.toInt() ?:
+                        throw BadRequestException("The type of Id is wrong.")
+                    var responseData: Problem? = null
 
-                    call.respond(
-                        mapOf(
-                            "problem" to (requestProblem ?: throw NotFoundException())
+                    transaction {
+                        val requestProblem = ProblemTable.select {
+                            ProblemTable.id.eq(requestId)
+                        }.first()
+
+                        val requestTestCases = TestCaseTable.select {
+                            TestCaseTable.problemId.eq(requestId)
+                        }.map {
+                            TestCase(
+                                id = it[TestCaseTable.id].toString(),
+                                input = it[TestCaseTable.input],
+                                expectedOutput = it[TestCaseTable.expectedOutput],
+                                comment = it[TestCaseTable.comment],
+                                score = it[TestCaseTable.score],
+                                timeOutSeconds = it[TestCaseTable.timeOutSeconds]
+                            )
+                        }.toList()
+
+                        responseData = Problem(
+                            id = requestProblem[ProblemTable.id].toString(),
+                            title = requestProblem[ProblemTable.title],
+                            description = requestProblem[ProblemTable.description],
+                            testCases = requestTestCases
                         )
-                    )
+                    }
+
+                    call.respond(mapOf("data" to responseData))
                 }
 
                 put {
-                    val requestId = call.parameters["id"]
-                    if (!testProblems.removeIf { it.id == requestId }) {
-                        throw NotFoundException()
+                    val requestId = call.parameters["id"]?.toInt() ?:
+                        throw BadRequestException("The type of Id is wrong.")
+                    val updateProblemContent = call.receive<ProblemPutDTO>()
+
+                    transaction {
+                        ProblemTable.update({ ProblemTable.id.eq(requestId)}) {
+                            it[ProblemTable.title] = updateProblemContent.title
+                            it[ProblemTable.description] = updateProblemContent.description
+                        }
+
+                        TestCaseTable.deleteWhere {
+                            TestCaseTable.problemId.eq(requestId)
+                                    .and(TestCaseTable.id.notInList(
+                                            updateProblemContent.testCases
+                                                    .mapNotNull { it.id?.toInt() }
+                                    ))
+                        }
+
+                        for (testcase in updateProblemContent.testCases) {
+                            if (testcase.id == null) {
+                                TestCaseTable.insert {
+                                    it[TestCaseTable.input] = testcase.input
+                                    it[TestCaseTable.expectedOutput] = testcase.expectedOutput
+                                    it[TestCaseTable.comment] = testcase.comment
+                                    it[TestCaseTable.score] = testcase.score
+                                    it[TestCaseTable.timeOutSeconds] = testcase.timeOutSeconds
+                                    it[TestCaseTable.problemId] = requestId
+                                }
+                                continue
+                            }
+
+                            TestCaseTable.update({ TestCaseTable.id.eq(testcase.id.toInt()) }){
+                                it[TestCaseTable.input] = testcase.input
+                                it[TestCaseTable.expectedOutput] = testcase.expectedOutput
+                                it[TestCaseTable.comment] = testcase.comment
+                                it[TestCaseTable.score] = testcase.score
+                                it[TestCaseTable.timeOutSeconds] = testcase.timeOutSeconds
+                            }
+                        }
                     }
 
-                    val updateProblemContent = call.receive<Problem>()
-                    testProblems += updateProblemContent
                     call.respond(mapOf(
                         "OK" to true
                     ))
                 }
 
                 delete {
-                    val requestId = call.parameters["id"]
-                    if (!testProblems.removeIf { it.id == requestId }) {
-                        throw NotFoundException()
+                    val requestId = call.parameters["id"]?.toInt() ?:
+                        throw BadRequestException("The type of Id is wrong.")
+
+                    transaction {
+                        TestCaseTable.deleteWhere { TestCaseTable.problemId.eq(requestId) }
+                        ProblemTable.deleteWhere { ProblemTable.id.eq(requestId) }
                     }
 
                     call.respond(mapOf(

@@ -35,6 +35,9 @@ dependencies {
     implementation("io.ktor:ktor-client-core-jvm:$ktor_version")
     implementation("io.ktor:ktor-client-apache:$ktor_version")
     implementation("io.ktor:ktor-jackson:$ktor_version")
+    implementation("com.zaxxer:HikariCP:3.4.5")
+    implementation("org.jetbrains.exposed:exposed:0.17.7")
+    implementation("org.postgresql:postgresql:42.2.16")
 
     testImplementation("io.ktor:ktor-server-tests:$ktor_version")
 }
