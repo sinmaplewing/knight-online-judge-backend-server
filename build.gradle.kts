@@ -40,6 +40,7 @@ dependencies {
     implementation("org.jetbrains.exposed:exposed:0.17.7")
     implementation("org.postgresql:postgresql:42.2.16")
     implementation("at.favre.lib:bcrypt:0.9.0")
+    implementation("redis.clients:jedis:3.3.0")
 
     testImplementation("io.ktor:ktor-server-tests:$ktor_version")
 }

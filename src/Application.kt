@@ -1,6 +1,8 @@
 package com.maplewing
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.SerializationFeature
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import io.ktor.application.*
@@ -14,9 +16,11 @@ import io.ktor.client.engine.apache.*
 import io.ktor.features.*
 import io.ktor.jackson.jackson
 import io.ktor.sessions.*
+import kotlinx.css.sub
 import org.apache.http.auth.AuthenticationException
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.transactions.transaction
+import redis.clients.jedis.Jedis
 
 fun main(args: Array<String>): Unit = io.ktor.server.netty.EngineMain.main(args)
 
@@ -39,6 +43,8 @@ fun initDatabase() {
 @kotlin.jvm.JvmOverloads
 fun Application.module(testing: Boolean = false) {
     initDatabase()
+
+    val jedis = Jedis()
 
     val client = HttpClient(Apache) {
     }
@@ -324,6 +330,7 @@ fun Application.module(testing: Boolean = false) {
                     val userIdAuthorityPrincipal = call.sessions.get<UserIdAuthorityPrincipal>()
                     val userId = userIdAuthorityPrincipal?.userId
                     var submissionId: Int? = null
+                    var testCaseData: List<JudgerTestCaseData>? = null
 
                     if (userId == null) throw UnauthorizedException()
 
@@ -336,7 +343,35 @@ fun Application.module(testing: Boolean = false) {
                             it[SubmissionTable.problemId] = submissionData.problemId
                             it[SubmissionTable.userId] = userId.toInt()
                         } get SubmissionTable.id
+
+                        testCaseData = TestCaseTable.select {
+                            TestCaseTable.problemId.eq(submissionData.problemId)
+                        }.map {
+                            JudgerTestCaseData(
+                                it[TestCaseTable.input],
+                                it[TestCaseTable.expectedOutput],
+                                it[TestCaseTable.score],
+                                it[TestCaseTable.timeOutSeconds]
+                            )
+                        }.toList()
                     }
+
+                    val judgerSubmissionId = submissionId ?: -1
+                    val judgerTestCaseData = testCaseData ?: listOf()
+                    if (judgerSubmissionId != -1 && !judgerTestCaseData.isEmpty()) {
+                        val judgerSubmissionData = JudgerSubmissionData(
+                            judgerSubmissionId,
+                            submissionData.language,
+                            submissionData.code,
+                            judgerTestCaseData
+                        )
+
+                        jedis.rpush(
+                            submissionData.language,
+                            jacksonObjectMapper().writeValueAsString(judgerSubmissionData)
+                        )
+                    }
+
                     call.respond(mapOf("submission_id" to submissionId))
                 }
 
