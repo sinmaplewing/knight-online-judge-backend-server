@@ -27,6 +27,7 @@ fun main(args: Array<String>): Unit = io.ktor.server.netty.EngineMain.main(args)
 const val SESSION_LOGIN_DATA_NAME = "login_data"
 const val NORMAL_USER_AUTHENTICAION_NAME = "Normal User"
 const val SUPER_USER_AUTHENTICATION_NAME = "Super User"
+const val SUBMISSION_NO_RESULT = "-"
 
 fun initDatabase() {
     val config = HikariConfig("/hikari.properties")
@@ -44,7 +45,7 @@ fun initDatabase() {
 fun Application.module(testing: Boolean = false) {
     initDatabase()
 
-    val jedis = Jedis()
+    var jedis: Jedis? = Jedis()
 
     val client = HttpClient(Apache) {
     }
@@ -339,7 +340,7 @@ fun Application.module(testing: Boolean = false) {
                             it[SubmissionTable.language] = submissionData.language
                             it[SubmissionTable.code] = submissionData.code
                             it[SubmissionTable.executedTime] = -1.0
-                            it[SubmissionTable.result] = "-"
+                            it[SubmissionTable.result] = SUBMISSION_NO_RESULT
                             it[SubmissionTable.problemId] = submissionData.problemId
                             it[SubmissionTable.userId] = userId.toInt()
                         } get SubmissionTable.id
@@ -356,9 +357,9 @@ fun Application.module(testing: Boolean = false) {
                         }.toList()
                     }
 
-                    val judgerSubmissionId = submissionId ?: -1
-                    val judgerTestCaseData = testCaseData ?: listOf()
-                    if (judgerSubmissionId != -1 && !judgerTestCaseData.isEmpty()) {
+                    val judgerSubmissionId: Int? = submissionId
+                    val judgerTestCaseData: List<JudgerTestCaseData>? = testCaseData
+                    if (judgerSubmissionId != null && judgerTestCaseData != null) {
                         val judgerSubmissionData = JudgerSubmissionData(
                             judgerSubmissionId,
                             submissionData.language,
@@ -366,13 +367,75 @@ fun Application.module(testing: Boolean = false) {
                             judgerTestCaseData
                         )
 
-                        jedis.rpush(
-                            submissionData.language,
-                            jacksonObjectMapper().writeValueAsString(judgerSubmissionData)
-                        )
+                        try {
+                            jedis = jedis.getConnection()
+                            val currentJedisConnection: Jedis = jedis!!
+                            currentJedisConnection.rpush(
+                                submissionData.language,
+                                jacksonObjectMapper().writeValueAsString(judgerSubmissionData)
+                            )
+                            currentJedisConnection.disconnect()
+                        } catch (e: Exception) {
+                            jedis?.disconnect()
+                            jedis = null
+                            println(e)
+                        }
                     }
 
                     call.respond(mapOf("submission_id" to submissionId))
+                }
+
+                authenticate(SUPER_USER_AUTHENTICATION_NAME) {
+                    post("/restart") {
+                        var unjudgedSubmissionData: List<JudgerSubmissionData>? = null
+                        var isOK = true
+
+                        transaction {
+                            unjudgedSubmissionData =
+                                SubmissionTable.select {
+                                    SubmissionTable.result.eq(SUBMISSION_NO_RESULT)
+                                }.map {
+                                    val testCaseData = TestCaseTable.select {
+                                        TestCaseTable.problemId.eq(it[SubmissionTable.problemId])
+                                    }.map {
+                                        JudgerTestCaseData(
+                                            it[TestCaseTable.input],
+                                            it[TestCaseTable.expectedOutput],
+                                            it[TestCaseTable.score],
+                                            it[TestCaseTable.timeOutSeconds]
+                                        )
+                                    }
+
+                                    JudgerSubmissionData(
+                                        it[SubmissionTable.id],
+                                        it[SubmissionTable.language],
+                                        it[SubmissionTable.code],
+                                        testCaseData
+                                    )
+                                }.toList()
+                        }
+
+                        val judgerSubmissionDataList = unjudgedSubmissionData
+                        if (judgerSubmissionDataList != null) {
+                            for (judgerSubmissionData in judgerSubmissionDataList) {
+                                try {
+                                    jedis = jedis.getConnection()
+                                    val currentJedisConnection: Jedis = jedis!!
+                                    currentJedisConnection.rpush(
+                                        judgerSubmissionData.langauge,
+                                        jacksonObjectMapper().writeValueAsString(judgerSubmissionData)
+                                    )
+                                } catch (e: Exception){
+                                    jedis?.disconnect()
+                                    jedis = null
+                                    println(e)
+                                    isOK = false
+                                }
+                            }
+                        }
+
+                        call.respond(mapOf("OK" to isOK))
+                    }
                 }
 
                 route("/{id}") {
@@ -406,6 +469,66 @@ fun Application.module(testing: Boolean = false) {
                         }
 
                         call.respond(mapOf("data" to responseData))
+                    }
+
+                    post("/restart") {
+                        val requestId = call.parameters["id"]?.toInt() ?:
+                            throw BadRequestException("The type of Id is wrong.")
+                        var unjudgedSubmissionData: JudgerSubmissionData? = null
+                        var isOK = true
+                        val userIdAuthorityPrincipal = call.sessions.get<UserIdAuthorityPrincipal>()
+                        val userId = userIdAuthorityPrincipal?.userId
+
+                        if (userId == null) throw UnauthorizedException()
+
+                        transaction {
+                            val submissionData =
+                                SubmissionTable.select {
+                                    SubmissionTable.id.eq(requestId)
+                                }.first()
+
+                            if (submissionData[SubmissionTable.userId] != userId.toInt()) {
+                                throw UnauthorizedException()
+                            }
+
+                            val testCaseData =
+                                TestCaseTable.select {
+                                    TestCaseTable.problemId.eq(submissionData[SubmissionTable.problemId])
+                                }.map {
+                                    JudgerTestCaseData(
+                                        it[TestCaseTable.input],
+                                        it[TestCaseTable.expectedOutput],
+                                        it[TestCaseTable.score],
+                                        it[TestCaseTable.timeOutSeconds]
+                                    )
+                                }
+
+                            unjudgedSubmissionData = JudgerSubmissionData(
+                                submissionData[SubmissionTable.id],
+                                submissionData[SubmissionTable.language],
+                                submissionData[SubmissionTable.code],
+                                testCaseData
+                            )
+                        }
+
+                        val judgerSubmissionData = unjudgedSubmissionData
+                        if (judgerSubmissionData != null) {
+                            try {
+                                jedis = jedis.getConnection()
+                                val currentJedisConnection: Jedis = jedis!!
+                                currentJedisConnection.rpush(
+                                    judgerSubmissionData.langauge,
+                                    jacksonObjectMapper().writeValueAsString(judgerSubmissionData)
+                                )
+                            } catch (e: Exception) {
+                                println(e)
+                                jedis?.disconnect()
+                                jedis = null
+                                isOK = false
+                            }
+                        }
+
+                        call.respond(mapOf("OK" to isOK))
                     }
                 }
             }
