@@ -70,10 +70,10 @@ Project Link: [https://github.com/sinmaplewing/knight-online-judge-backend-serve
 <!-- MARKDOWN LINKS & IMAGES -->
 <!-- https://www.markdownguide.org/basic-syntax/#reference-style-links -->
 [contributors-shield]: https://img.shields.io/github/contributors/sinmaplewing/knight-online-judge-backend-server
-[contributors-url]: https://github.com/sinmaplewing/knight-online-judge-backend-servergraphs/contributors
+[contributors-url]: https://github.com/sinmaplewing/knight-online-judge-backend-server/graphs/contributors
 [forks-shield]: https://img.shields.io/github/forks/sinmaplewing/knight-online-judge-backend-server
 [forks-url]: https://github.com/sinmaplewing/knight-online-judge-backend-server/network/members
-[stars-shield]: https://img.shields.io/github/stars/sinmaplewing/game-project-dodge
+[stars-shield]: https://img.shields.io/github/stars/sinmaplewing/knight-online-judge-backend-server
 [stars-url]: https://github.com/sinmaplewing/knight-online-judge-backend-server/stargazers
 [issues-shield]: https://img.shields.io/github/issues/sinmaplewing/knight-online-judge-backend-server
 [issues-url]: https://github.com/sinmaplewing/knight-online-judge-backend-server/issues
