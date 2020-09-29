@@ -1,6 +1,5 @@
 package com.maplewing
 
-import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.SerializationFeature
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.zaxxer.hikari.HikariConfig
@@ -16,9 +15,8 @@ import io.ktor.client.engine.apache.*
 import io.ktor.features.*
 import io.ktor.jackson.jackson
 import io.ktor.sessions.*
-import kotlinx.css.sub
-import org.apache.http.auth.AuthenticationException
 import org.jetbrains.exposed.sql.*
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.like
 import org.jetbrains.exposed.sql.transactions.transaction
 import redis.clients.jedis.Jedis
 
@@ -62,6 +60,8 @@ fun Application.module(testing: Boolean = false) {
             storage = SessionStorageMemory()
         ) {
             cookie.path = "/"
+            cookie.extensions["SameSite"] = "None"
+            cookie.extensions["Secure"] = "true"
         }
     }
 
@@ -115,27 +115,134 @@ fun Application.module(testing: Boolean = false) {
         }
     }
 
+    install(CORS) {
+        method(HttpMethod.Get)
+        method(HttpMethod.Post)
+        method(HttpMethod.Put)
+        method(HttpMethod.Delete)
+        method(HttpMethod.Options)
+        anyHost()
+
+        allowCredentials = true
+        allowNonSimpleContentTypes = true
+    }
+
     routing {
         get("/") {
             call.respond(mapOf("OK" to true))
         }
 
         route("/problems") {
-            get {
-                var problems: List<Map<String, Any>>? = null
+            authenticate(NORMAL_USER_AUTHENTICAION_NAME, optional = true) {
+                get {
+                    val userIdAuthorityPrincipal = call.sessions.get<UserIdAuthorityPrincipal>()
+                    var problems: List<Map<String, Any>>? = null
 
-                transaction {
-                    problems = ProblemTable.selectAll().map {
-                        mapOf(
-                            "id" to it[ProblemTable.id].toString(),
-                            "title" to it[ProblemTable.title]
-                        )
+                    transaction {
+                        val problemContents = ProblemTable.selectAll()
+                            .orderBy(ProblemTable.id).map {
+                                mutableMapOf(
+                                    "id" to it[ProblemTable.id].toString(),
+                                    "title" to it[ProblemTable.title]
+                                )
+                            }
+
+                        if (userIdAuthorityPrincipal == null) {
+                            problems = problemContents
+                        } else {
+                            val problemIds = problemContents.mapNotNull { it?.get("id")?.toInt() }
+                            val minProblemId = problemIds.min()
+                            val maxProblemId = problemIds.max()
+
+                            if (minProblemId != null && maxProblemId != null) {
+                                val distinctIdCount = SubmissionTable.id.countDistinct()
+                                val acceptedResultSum = SubmissionTable.result.like("Accepted%")
+                                    .castTo<Int>(IntegerColumnType())
+                                    .sum()
+
+                                val submissions = SubmissionTable
+                                    .slice(
+                                        SubmissionTable.problemId,
+                                        distinctIdCount,
+                                        acceptedResultSum
+                                    ).select {
+                                        SubmissionTable.problemId.lessEq(maxProblemId).and(
+                                            SubmissionTable.problemId.greaterEq(minProblemId)
+                                    )}.groupBy(SubmissionTable.problemId)
+                                    .forEach { row ->
+                                        val problemElement = problemContents.first {
+                                            it?.get("id") == row[SubmissionTable.problemId].toString()
+                                        }
+                                        val acceptedResultSum = row[acceptedResultSum]
+                                        problemElement["isSubmitted"] = (row[distinctIdCount] > 0).toString()
+                                        problemElement["isAccepted"] = (acceptedResultSum != null && acceptedResultSum > 0).toString()
+                                    }
+                            }
+                            problems = problemContents
+                        }
                     }
+
+                    call.respond(
+                        mapOf(
+                            "data" to problems,
+                            "isEditable" to ((userIdAuthorityPrincipal?.authority?.toInt() ?: 0) > 1)
+                        )
+                    )
                 }
 
-                call.respond(mapOf(
-                    "data" to problems
-                ))
+                get {
+                    val userIdAuthorityPrincipal = call.sessions.get<UserIdAuthorityPrincipal>()
+                    var problems: List<Map<String, Any>>? = null
+
+                    transaction {
+                        val problemContents = ProblemTable.selectAll().map {
+                            mutableMapOf(
+                                "id" to it[ProblemTable.id].toString(),
+                                "title" to it[ProblemTable.title]
+                            )
+                        }
+
+                        if (userIdAuthorityPrincipal == null) {
+                            problems = problemContents
+                        } else {
+                            val problemIds = problemContents.mapNotNull { it?.get("id")?.toInt() }
+                            val minProblemId = problemIds.min()
+                            val maxProblemId = problemIds.max()
+
+                            if (minProblemId != null && maxProblemId != null) {
+                                val distinctIdCount = SubmissionTable.id.countDistinct()
+                                val acceptedResultSum = SubmissionTable.result.like("Accepted%")
+                                    .castTo<Int>(IntegerColumnType())
+                                    .sum()
+
+                                val submissions = SubmissionTable
+                                    .slice(
+                                        SubmissionTable.problemId,
+                                        distinctIdCount,
+                                        acceptedResultSum
+                                    ).select {
+                                        SubmissionTable.problemId.lessEq(maxProblemId).and(
+                                            SubmissionTable.problemId.greaterEq(minProblemId)
+                                        )}.groupBy(SubmissionTable.problemId)
+                                    .forEach { row ->
+                                        val problemElement = problemContents.first {
+                                            it?.get("id") == row[SubmissionTable.problemId].toString()
+                                        }
+                                        val acceptedResultSum = row[acceptedResultSum]
+                                        problemElement["isSubmitted"] = (row[distinctIdCount] > 0).toString()
+                                        problemElement["isAccepted"] = (acceptedResultSum != null && acceptedResultSum > 0).toString()
+                                    }
+                            }
+                            problems = problemContents
+                        }
+                    }
+
+                    call.respond(
+                        mapOf(
+                            "data" to problems
+                        )
+                    )
+                }
             }
 
             authenticate(SUPER_USER_AUTHENTICATION_NAME) {
@@ -173,35 +280,57 @@ fun Application.module(testing: Boolean = false) {
                 get {
                     val requestId = call.parameters["id"]?.toInt() ?:
                         throw BadRequestException("The type of Id is wrong.")
-                    var responseData: Problem? = null
+                    var responseData: ProblemDetailData? = null
 
                     transaction {
                         val requestProblem = ProblemTable.select {
                             ProblemTable.id.eq(requestId)
                         }.first()
 
-                        val requestTestCases = TestCaseTable.select {
-                            TestCaseTable.problemId.eq(requestId)
-                        }.map {
-                            TestCase(
-                                id = it[TestCaseTable.id].toString(),
-                                input = it[TestCaseTable.input],
-                                expectedOutput = it[TestCaseTable.expectedOutput],
-                                comment = it[TestCaseTable.comment],
-                                score = it[TestCaseTable.score],
-                                timeOutSeconds = it[TestCaseTable.timeOutSeconds]
-                            )
-                        }.toList()
-
-                        responseData = Problem(
+                        responseData = ProblemDetailData(
                             id = requestProblem[ProblemTable.id].toString(),
                             title = requestProblem[ProblemTable.title],
-                            description = requestProblem[ProblemTable.description],
-                            testCases = requestTestCases
+                            description = requestProblem[ProblemTable.description]
                         )
                     }
 
                     call.respond(mapOf("data" to responseData))
+                }
+
+                authenticate(SUPER_USER_AUTHENTICATION_NAME) {
+                    get("/all") {
+                        val requestId =
+                            call.parameters["id"]?.toInt() ?: throw BadRequestException("The type of Id is wrong.")
+                        var responseData: Problem? = null
+
+                        transaction {
+                            val requestProblem = ProblemTable.select {
+                                ProblemTable.id.eq(requestId)
+                            }.first()
+
+                            val requestTestCases = TestCaseTable.select {
+                                TestCaseTable.problemId.eq(requestId)
+                            }.map {
+                                TestCase(
+                                    id = it[TestCaseTable.id].toString(),
+                                    input = it[TestCaseTable.input],
+                                    expectedOutput = it[TestCaseTable.expectedOutput],
+                                    comment = it[TestCaseTable.comment],
+                                    score = it[TestCaseTable.score],
+                                    timeOutSeconds = it[TestCaseTable.timeOutSeconds]
+                                )
+                            }.toList()
+
+                            responseData = Problem(
+                                id = requestProblem[ProblemTable.id].toString(),
+                                title = requestProblem[ProblemTable.title],
+                                description = requestProblem[ProblemTable.description],
+                                testCases = requestTestCases
+                            )
+                        }
+
+                        call.respond(mapOf("data" to responseData))
+                    }
                 }
 
                 authenticate(SUPER_USER_AUTHENTICATION_NAME) {
@@ -274,6 +403,48 @@ fun Application.module(testing: Boolean = false) {
         }
 
         route("/users") {
+            get {
+                var users: List<Map<String, Any>>? = null
+
+                transaction {
+                    val userContents = UserTable.selectAll().map {
+                        mutableMapOf(
+                            "id" to it[UserTable.id].toString(),
+                            "name" to it[UserTable.name]
+                        )
+                    }
+
+                    val solvedProblemCount = mutableMapOf<Int, Int>()
+                    val acPairs = SubmissionTable
+                        .slice(SubmissionTable.userId, SubmissionTable.problemId)
+                        .select {
+                            SubmissionTable.result.like("Accepted%")
+                        }.groupBy(SubmissionTable.userId, SubmissionTable.problemId)
+                        .forEach {
+                            val userId = it[SubmissionTable.userId]
+                            solvedProblemCount[userId] = solvedProblemCount.getOrDefault(userId, 0) + 1
+                        }
+
+                    for (userContent in userContents) {
+                        val userContentId = userContent["id"]
+                        if (userContentId != null) {
+                            userContent["solvedProblemCount"] = solvedProblemCount.getOrDefault(
+                                userContentId.toInt(),
+                                0
+                            ).toString()
+                        }
+                    }
+
+                    users = userContents
+                }
+
+                call.respond(
+                    mapOf(
+                        "data" to users
+                    )
+                )
+            }
+
             post {
                 val userData = call.receive<UserPostDTO>()
                 var userId: Int? = null
@@ -292,39 +463,116 @@ fun Application.module(testing: Boolean = false) {
             }
 
             post("/login") {
-                val userLoginDTO = call.receive<UserLoginDTO>()
-                var userId: Int? = null
-                var authority: Int? = null
+                try {
+                    val userLoginDTO = call.receive<UserLoginDTO>()
+                    var userId: Int? = null
+                    var authority: Int? = null
 
-                transaction {
-                    val userData = UserTable.select { UserTable.username.eq(userLoginDTO.username) }.firstOrNull()
+                    transaction {
+                        val userData = UserTable.select { UserTable.username.eq(userLoginDTO.username) }.firstOrNull()
 
-                    if (userData == null) throw UnauthorizedException()
+                        if (userData == null) throw UnauthorizedException()
 
-                    if (!PasswordHasher.verifyPassword(
-                            userLoginDTO.password,
-                            userData?.get(UserTable.password)
-                    )) {
-                        throw UnauthorizedException()
+                        if (!PasswordHasher.verifyPassword(
+                                userLoginDTO.password,
+                                userData?.get(UserTable.password)
+                            )
+                        ) {
+                            throw UnauthorizedException()
+                        }
+
+                        userId = userData.get(UserTable.id)
+                        authority = userData.get(UserTable.authority)
                     }
 
-                    userId = userData.get(UserTable.id)
-                    authority = userData.get(UserTable.authority)
+                    if (userId == null || authority == null) throw UnauthorizedException()
+
+                    call.sessions.set(
+                        SESSION_LOGIN_DATA_NAME,
+                        UserIdAuthorityPrincipal(userId.toString(), authority.toString())
+                    )
+
+                    call.respond(mapOf("OK" to true))
+                } catch (e: Exception) {
+                    call.respond(mapOf("OK" to false))
                 }
-
-                if (userId == null || authority == null) throw UnauthorizedException()
-
-                call.sessions.set(SESSION_LOGIN_DATA_NAME, UserIdAuthorityPrincipal(userId.toString(), authority.toString()))
-                call.respond(mapOf("OK" to true))
             }
 
             post("/logout") {
                 call.sessions.clear(SESSION_LOGIN_DATA_NAME)
                 call.respond(mapOf("OK" to true))
             }
+
+            authenticate(NORMAL_USER_AUTHENTICAION_NAME, optional = true) {
+                get("/check") {
+                    val userIdAuthorityPrincipal = call.sessions.get<UserIdAuthorityPrincipal>()
+
+                    if (userIdAuthorityPrincipal == null) {
+                        call.respond(UserCheckDTO(null))
+                    } else {
+                        val userId = userIdAuthorityPrincipal.userId.toInt()
+                        var authority = userIdAuthorityPrincipal.authority.toInt()
+                        var name = ""
+
+                        transaction {
+                            val userData = UserTable.select { UserTable.id.eq(userId) }.first()
+                            name = userData[UserTable.name]
+                            authority = userData[UserTable.authority]
+                            call.sessions.set(
+                                SESSION_LOGIN_DATA_NAME,
+                                UserIdAuthorityPrincipal(userId.toString(), authority.toString())
+                            )
+                        }
+
+                        call.respond(UserCheckDTO(userId, name, authority))
+                    }
+                }
+            }
         }
 
         route("/submissions") {
+            authenticate(NORMAL_USER_AUTHENTICAION_NAME, optional = true) {
+                get {
+                    var userIdAuthorityPrincipal = call.sessions.get<UserIdAuthorityPrincipal>()
+                    var submissions: List<Map<String, Any>>? = null
+
+                    transaction {
+                        submissions = (SubmissionTable innerJoin ProblemTable innerJoin UserTable)
+                            .slice(
+                                SubmissionTable.id,
+                                UserTable.id,
+                                UserTable.name,
+                                ProblemTable.id,
+                                ProblemTable.title,
+                                SubmissionTable.language,
+                                SubmissionTable.result,
+                                SubmissionTable.executedTime
+                            ).selectAll()
+                            .orderBy(SubmissionTable.id, SortOrder.DESC)
+                            .map {
+                                mapOf(
+                                    "id" to it[SubmissionTable.id].toString(),
+                                    "name" to it[UserTable.name],
+                                    "problemId" to it[ProblemTable.id],
+                                    "title" to it[ProblemTable.title],
+                                    "language" to it[SubmissionTable.language],
+                                    "result" to it[SubmissionTable.result],
+                                    "executedTime" to it[SubmissionTable.executedTime],
+                                    "isRefreshable" to (userIdAuthorityPrincipal != null &&
+                                        it[UserTable.id].toString() == userIdAuthorityPrincipal.userId)
+                                )
+                            }
+                    }
+
+                    call.respond(
+                        mapOf(
+                            "data" to submissions,
+                            "isRefreshable" to (userIdAuthorityPrincipal != null && userIdAuthorityPrincipal.authority.toInt() > 1)
+                        )
+                    )
+                }
+            }
+
             authenticate(NORMAL_USER_AUTHENTICAION_NAME) {
                 post {
                     val submissionData = call.receive<SubmissionPostDTO>()
@@ -356,6 +604,8 @@ fun Application.module(testing: Boolean = false) {
                             )
                         }.toList()
                     }
+
+                    SubmissionTable.all
 
                     val judgerSubmissionId: Int? = submissionId
                     val judgerTestCaseData: List<JudgerTestCaseData>? = testCaseData
@@ -422,7 +672,7 @@ fun Application.module(testing: Boolean = false) {
                                     jedis = jedis.getConnection()
                                     val currentJedisConnection: Jedis = jedis!!
                                     currentJedisConnection.rpush(
-                                        judgerSubmissionData.langauge,
+                                        judgerSubmissionData.language,
                                         jacksonObjectMapper().writeValueAsString(judgerSubmissionData)
                                     )
                                 } catch (e: Exception){
@@ -517,7 +767,7 @@ fun Application.module(testing: Boolean = false) {
                                 jedis = jedis.getConnection()
                                 val currentJedisConnection: Jedis = jedis!!
                                 currentJedisConnection.rpush(
-                                    judgerSubmissionData.langauge,
+                                    judgerSubmissionData.language,
                                     jacksonObjectMapper().writeValueAsString(judgerSubmissionData)
                                 )
                             } catch (e: Exception) {

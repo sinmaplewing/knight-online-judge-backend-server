@@ -23,6 +23,12 @@ data class UserLoginDTO (
     val password: String
 )
 
+data class UserCheckDTO (
+    val userId: Int? = null,
+    val name: String = "",
+    val authority: Int = 0
+)
+
 object UserTable: Table() {
     val id = integer("UserId").autoIncrement().primaryKey()
     val username = varchar("Username", 255).uniqueIndex()

@@ -9,6 +9,12 @@ data class Problem(
     val testCases: List<TestCase>
 )
 
+data class ProblemDetailData(
+    val id: String,
+    val title: String,
+    val description: String
+)
+
 data class ProblemPostDTO(
     val title: String,
     val description: String,
